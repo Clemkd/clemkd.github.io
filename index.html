@@ -1,1 +1,119 @@
+<html>
+    <body>
+        <h1>PostgreSQL aggregate table invalidation tip</h1>
+        <p>
+            We have a time-based serie table "raws" where our device records are saved one by one.
 
+            <table>
+                <tr>
+                    <th>Column</th>
+                    <th>Type</th>
+                    <th>Description</th>
+                </tr>
+                <tr>
+                    <td>device</td>
+                    <td>text</td>
+                    <td>Device unique id</td>    
+                </tr>
+                <tr>
+                    <td>time</td>
+                    <td>timestamptz</td>
+                    <td>Record time</td>
+                </tr>
+                <tr>
+                    <td>value</td>
+                    <td>int4</td>
+                    <td>Value recorded</td>
+                </tr>
+            </table>
+
+            <br/>
+            This table have a huge amount of record in it (~20 000 000).
+            Calculate the sum or the average of "value" for each device and time 
+            take more than 2 minutes to proceed, even if we use indexes well.
+            In that way, it is necessary to calculate the result which will be invalidated 
+            for each action on the "raws" table (insert, update, delete).
+
+            <br/>
+            We create a daily aggregate table named "raws_daily_aggregate" to store results by device and by day :
+            
+            <br/>
+            <table>
+                <tr>
+                    <th>Column</th>
+                    <th>Type</th>
+                    <th>Description</th>
+                </tr>
+                <tr>
+                    <td>device</td>
+                    <td>text</td>
+                    <td>Device unique id</td>    
+                </tr>
+                <tr>
+                    <td>day</td>
+                    <td>date</td>
+                    <td>Day of group</td>
+                </tr>
+                <tr>
+                    <td>values_sum</td>
+                    <td>int4</td>
+                    <td>Sum of all values of the device in the specified day</td>
+                </tr>
+                <tr>
+                    <td>updated_at</td>
+                    <td>timestamptz</td>
+                    <td>Last update timestamp of that group</td>
+                </tr>
+            </table>
+
+            <br/>
+            When "updated_at" column is null, "values_sum" is invalid and must be (re)calculated.
+            A cron job must be created to update aggregate table. This job will calculate "values_sum" of each
+            record where "updated_at" column is null. It avoids to calculate all device/day pairs if it is not necessary.
+
+            <br/>
+            Now, we have to create the function which will set "updated_at" to null when actions are done in the "raws" table.
+
+            <code>
+                CREATE OR REPLACE FUNCTION invalidate_daily_aggregate_part()
+                RETURNS TRIGGER 
+                LANGUAGE PLPGSQL
+                AS
+                $$
+                DECLARE
+                    x_rec record;
+                BEGIN
+                    insert into raws_daily_aggregate ("device", "day", "updated_at") 
+                    select distinct on ("device", "day") "device", "day", null from _table
+                    on conflict ("device", "day") do update set "updated_at" = null;
+
+                    RETURN NULL;
+                END;
+                $$;
+            </code>
+
+            <br/>
+            This function must be called after each statement :
+            <br/>
+            <code>
+                create or replace TRIGGER invalidate_daily_aggregate_part_insert_trigger
+                AFTER INSERT ON public.raws
+                REFERENCING NEW TABLE AS _table
+                FOR EACH STATEMENT
+                EXECUTE PROCEDURE public.invalidate_daily_aggregate_part();
+
+                create or replace TRIGGER invalidate_daily_aggregate_part_update_trigger
+                AFTER UPDATE ON public.raws
+                REFERENCING NEW TABLE AS _table
+                FOR EACH STATEMENT
+                EXECUTE PROCEDURE public.invalidate_daily_aggregate_part();
+
+                create or replace TRIGGER invalidate_daily_aggregate_part_delete_trigger
+                AFTER DELETE ON public.raws
+                REFERENCING OLD TABLE AS _table
+                FOR EACH STATEMENT
+                EXECUTE PROCEDURE public.invalidate_daily_aggregate_part();
+            </code>
+        </p>
+    </body>    
+</html>
